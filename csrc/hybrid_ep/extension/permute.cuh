@@ -56,6 +56,7 @@ struct UnpermuteArgs {
   int local_rank;
   int num_ranks_per_node;
   bool with_probs;
+  bool apply_probs_to_hidden;
   int num_of_blocks_permute_api;
   cudaStream_t stream;
 };
@@ -139,4 +140,3 @@ struct UnpermuteArgs {
      return static_cast<DType>(value);
    }
  }
-

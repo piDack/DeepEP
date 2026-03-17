@@ -67,6 +67,9 @@ def cast_fp8_to_bf16(x_fp8: torch.Tensor, x_scales: torch.Tensor):
     aligned_n = align_up(n, 128)
     x_fp8_padded = torch.nn.functional.pad(x_fp8, (0, aligned_n - n), mode='constant', value=0)
     if x_scales.dtype == torch.int:
+        # Packed ue8m0 scales may be produced via a transposed view, so make the
+        # storage contiguous before reinterpreting int32 bytes as floats.
+        x_scales = x_scales.contiguous()
         x_scales = x_scales.view(dtype=torch.uint8).to(torch.int) << 23
         x_scales = x_scales.view(dtype=torch.float)
     x_fp32_padded = x_fp8_padded.to(torch.float32).view(x_fp8.size(0), -1, 128)
@@ -666,4 +669,3 @@ def count_rdma_send_from_routing_map(routing_map: torch.Tensor, local_node_id: i
     rdma_routing_map = routing_map.max(dim=-1).values 
 
     return rdma_routing_map.sum().item()
-

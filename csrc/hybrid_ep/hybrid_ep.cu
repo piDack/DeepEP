@@ -343,13 +343,15 @@ HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config,
         c10::optional<torch::Tensor> row_id_map,
         int64_t num_of_tokens_per_rank,
         c10::optional<int64_t> pad_multiple,
-        bool with_probs)
+        bool with_probs,
+        bool apply_probs_to_hidden)
 {
   // Check the input tensors
   assert(c10::elementSize(hidden.scalar_type()) == 2);
   assert(hidden.device().is_cuda());
   assert(hidden.dtype() != torch::kUInt8);
   assert(hidden.is_contiguous());
+  assert(!apply_probs_to_hidden || with_probs);
   if (with_probs) {
     assert(probs.has_value());
     assert(probs.value().device().is_cuda());
@@ -380,6 +382,7 @@ HybridEPBuffer::combine_with_unpermute(HybridEpConfigInstance config,
   args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
   args.num_of_tokens_per_rank = num_of_tokens_per_rank;
   args.enable_unpermute = true;
+  args.apply_probs_to_hidden = apply_probs_to_hidden;
   args.stream = at::cuda::getCurrentCUDAStream();
 
   // Run the full combine operation

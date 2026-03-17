@@ -462,7 +462,7 @@
  }
  
  template <const int block_size = 512, typename DType, typename ProbType>
- __global__ void unpermute_kernel(DType* permuted_tokens,
+__global__ void unpermute_kernel(DType* permuted_tokens,
                                   DType* tokens,
                                   ProbType* permuted_probs,
                                   ProbType* probs,
@@ -471,7 +471,8 @@
                                   int num_of_local_experts,
                                   int hidden_size,
                                   int local_rank,
-                                  int num_ranks_per_node) {
+                                  int num_ranks_per_node,
+                                  bool apply_probs_to_hidden) {
    // Index of the current token
    // Each extended warp contains 4 warps, and will reduce multi-experts tokens
    // to 1 token
@@ -513,9 +514,13 @@
           int64_t source_token_id = expert_routing_map[extended_warp_id * num_of_local_experts + i];
           if (source_token_id > 0) {
             buffer_fp4 = permuted_tokens_fp4[(source_token_id - 1) * hidden_size_fp4 + j];
+            float prob = 1.0f;
+            if (apply_probs_to_hidden) {
+              prob = static_cast<float>(permuted_probs[source_token_id - 1]);
+            }
     #pragma unroll
             for (int k = 0; k < num_eles_per_float4; k++) {
-              accumulator_fp4[k] += DType2Float<DType>(buffer_ptr[k]);
+              accumulator_fp4[k] += DType2Float<DType>(buffer_ptr[k]) * prob;
             }
           }
         }
@@ -548,8 +553,9 @@
  }
  
  template <typename DType, typename ProbType>
- void unpermute_launcher(UnpermuteArgs args) {
+void unpermute_launcher(UnpermuteArgs args) {
    assert(args.permuted_tokens.dtype() == torch::kBFloat16);
+   assert(!args.apply_probs_to_hidden || args.with_probs);
    if (args.with_probs) {
      assert(args.permuted_probs.has_value());
      assert(args.permuted_probs.value().dtype() == torch::kFloat32);
@@ -573,7 +579,8 @@
        args.num_of_local_experts, 
        args.hidden_size, 
        args.local_rank,
-       args.num_ranks_per_node
+       args.num_ranks_per_node,
+       args.apply_probs_to_hidden
     );
  
    CUDA_CHECK(cudaGetLastError());

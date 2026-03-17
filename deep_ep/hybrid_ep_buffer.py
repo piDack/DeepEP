@@ -542,6 +542,7 @@ class HybridEPBuffer:
         probs: torch.Tensor = None,
         handle: tuple = None,
         pad_multiple: int = None,
+        apply_probs_to_hidden: bool = False,
         # Deprecated parameters
         num_dispatched_tokens: int = None,
     ):
@@ -580,5 +581,6 @@ class HybridEPBuffer:
                 num_of_tokens_per_rank=num_of_tokens_per_rank,
                 pad_multiple=pad_multiple,
                 with_probs=probs is not None,
+                apply_probs_to_hidden=apply_probs_to_hidden,
             )
         return combined_token, combined_probs

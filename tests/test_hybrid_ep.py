@@ -85,6 +85,26 @@ def init_tensor(
     return hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights
 
 
+def sample_normalized_topk_probs(
+    topk_idx: torch.Tensor,
+    num_of_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    topk_weights = torch.rand(
+        topk_idx.shape,
+        device=topk_idx.device,
+        dtype=torch.float32,
+    )
+    topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    probs = torch.zeros(
+        topk_idx.shape[0],
+        num_of_experts,
+        device=topk_idx.device,
+        dtype=torch.float32,
+    )
+    probs.scatter_(1, topk_idx, topk_weights)
+    return probs, topk_weights
+
+
 def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, use_fp8: bool):
     hidden, probs, scaling_factor, routing_map, topk_idx, topk_weights  = init_tensor(
         hidden_dim=HIDDEN_DIM,
@@ -222,6 +242,40 @@ def test_hybrid_ep_correctness(buffer: deep_ep.HybridEPBuffer, ref: TorchRef, us
         )
         if combined_probs is not None and probs is not None:
             assert bitwise_equal(combined_probs, probs)
+
+        if with_probs:
+            weighted_probs, _ = sample_normalized_topk_probs(topk_idx, NUM_OF_EXPERTS)
+            (
+                weighted_hidden,
+                weighted_dispatched_probs,
+                weighted_scaling_factor,
+                _,
+                weighted_handle,
+            ) = buffer.dispatch_with_permute(
+                hidden=hidden,
+                routing_map=routing_map,
+                probs=weighted_probs,
+                scaling_factor=scaling_factor,
+                pad_multiple=PAD_MULTIPLE,
+            )
+            weighted_hidden = weighted_hidden.to(torch.bfloat16)
+            weighted_combined_hidden, weighted_combined_probs = (
+                buffer.combine_with_unpermute(
+                    hidden=weighted_hidden,
+                    probs=weighted_dispatched_probs,
+                    handle=weighted_handle,
+                    pad_multiple=PAD_MULTIPLE,
+                    apply_probs_to_hidden=True,
+                )
+            )
+
+            assert torch.allclose(
+                weighted_combined_hidden,
+                hidden.to(torch.bfloat16),
+                atol=2e-5,
+                rtol=1e-2,
+            )
+            assert bitwise_equal(weighted_combined_probs, weighted_probs)
 
     print_in_order(f'[rank {dist.get_rank()}] Correctness check passed ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})')
 

@@ -349,6 +349,7 @@ void Executor::combine_preprocess(HybridEpConfigInstance config, CombineArgs& ar
         unpermute_args.local_rank = local_rank;
         unpermute_args.num_ranks_per_node = config.num_of_ranks_per_node;
         unpermute_args.with_probs = config.backward_combine_api;
+        unpermute_args.apply_probs_to_hidden = args.apply_probs_to_hidden;
         unpermute_args.stream = args.stream;
         unpermute_args.num_of_blocks_permute_api = config.num_of_blocks_permute_api;
         
@@ -428,4 +429,3 @@ void Executor::combine_postprocess(HybridEpConfigInstance config, CombineArgs& a
     // No postprocess is needed for the combine kernel now.
     nvtxRangePop();  // End of combine_postprocess nvtx range
 }
-

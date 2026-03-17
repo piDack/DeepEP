@@ -165,6 +165,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
              py::arg("attn_to_rdma_map"), py::arg("num_dispatched_tokens_tensor"),
              py::arg("row_id_map"),
              py::arg("num_of_tokens_per_rank"), py::arg("pad_multiple") = std::nullopt,
-             py::arg("with_probs") = false);    
+             py::arg("with_probs") = false,
+             py::arg("apply_probs_to_hidden") = false);    
     
   }

@@ -66,6 +66,7 @@ public:
         // Misc
         int pad_multiple;  // Used in the padding case of unpermute
         bool enable_unpermute = false;
+        bool apply_probs_to_hidden = false;
         int64_t num_of_tokens_per_rank;  // Dynamic sequence length
         cudaStream_t stream;
     };
@@ -123,4 +124,3 @@ private:
     InterNodeCombineBuffers *inter_node_combine_buffers = nullptr;
 #endif
 };
-

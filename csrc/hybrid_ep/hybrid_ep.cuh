@@ -69,7 +69,8 @@ public:
           c10::optional<torch::Tensor> row_id_map,
           int64_t num_of_tokens_per_rank,
           c10::optional<int64_t> pad_multiple,
-          bool with_probs);       
+          bool with_probs,
+          bool apply_probs_to_hidden);       
 
 private:
 #ifdef HYBRID_EP_BUILD_MULTINODE_ENABLE
