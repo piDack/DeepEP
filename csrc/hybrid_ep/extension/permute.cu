@@ -41,7 +41,7 @@
                                            int* workspace_2,
                                            int rows_workspace_2,
                                            int pad_multiple,
-                                           int64_t* tokens_per_expert,
+                                           int* tokens_per_expert,
                                            int* row_id_map,
                                            int* overflow_flag,
                                            int num_permuted_tokens) {
@@ -62,7 +62,7 @@
    for (int i = grid.thread_rank(); i < rows_workspace_2 * num_of_local_experts; i += grid.size())
      workspace_2[i] = 0;
    for (int i = grid.thread_rank(); i < num_of_local_experts; i += grid.size())
-     tokens_per_expert[i] = 0L;
+     tokens_per_expert[i] = 0;
 
    // Initialize the overflow flag
    if(threadIdx.x == 0 && blockIdx.x == 0) {
@@ -136,9 +136,7 @@
          atomicAdd(&workspace_2[pos * num_of_local_experts + i], sum);
        }
        if (threadIdx.x == 0) {
-          // This method works because, in two’s complement representation, addition on signed and unsigned integers uses exactly the same bitwise operations.
-          atomicAdd(reinterpret_cast<unsigned long long*>(&tokens_per_expert[i]), 
-            static_cast<unsigned long long>(sum));
+          atomicAdd(&tokens_per_expert[i], sum);
        }
      }
      __syncthreads();
@@ -164,7 +162,7 @@
     * token_per_expert. workspace_1, workspace_2 to update the row_id_map
     */
    for (int i = threadIdx.x; i < num_of_local_experts; i += block_size) {
-     tokens_per_expert_shmem[i] = static_cast<int>(tokens_per_expert[i]);
+     tokens_per_expert_shmem[i] = tokens_per_expert[i];
      tokens_per_expert_prefix_sum[i] =
          (tokens_per_expert_shmem[i] + pad_multiple - 1) / pad_multiple * pad_multiple;
    }
@@ -239,9 +237,9 @@
        auto tokens_for_expert_i = tokens_per_expert_shmem[i] + num_padded_tokens[i];
        auto overflow_num = tokens_for_expert_i + tokens_per_expert_prefix_sum[i] - num_permuted_tokens;
        if(overflow_num < 0) {
-        tokens_per_expert[i] = static_cast<int64_t>(tokens_for_expert_i);
+        tokens_per_expert[i] = tokens_for_expert_i;
        }else{
-        tokens_per_expert[i] = static_cast<int64_t>(max(0, tokens_for_expert_i - overflow_num));
+        tokens_per_expert[i] = max(0, tokens_for_expert_i - overflow_num);
        }
      }
    }
@@ -270,10 +268,10 @@
    torch::Tensor tokens_per_expert;
    if (non_blocking) {
      tokens_per_expert =
-         torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+         torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
    } else {
      tokens_per_expert =
-         torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+         torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
    }
    torch::Tensor overflow_flag = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
  
@@ -293,7 +291,7 @@
    // Construct the parameters for the cooperative kernel
    auto workspace1_ptr = workspace1.data_ptr<int>();
    auto workspace2_ptr = workspace2.data_ptr<int>();
-   auto tokens_per_expert_ptr = tokens_per_expert.data_ptr<int64_t>();
+   auto tokens_per_expert_ptr = tokens_per_expert.data_ptr<int>();
    auto row_id_map_ptr = row_id_map.data_ptr<int>();
    auto num_dispatched_token_ptr = num_dispatched_token_tensor.data_ptr<int>();
    auto overflow_flag_ptr = overflow_flag.data_ptr<int>();

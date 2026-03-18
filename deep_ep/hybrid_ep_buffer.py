@@ -104,6 +104,39 @@ class HybridEPBuffer:
         self.num_sms_dispatch_api = num_sms_dispatch_api
         self.num_sms_combine_api = num_sms_combine_api
         self.num_blocks_permute_api = num_blocks_permute_api
+        self._num_threads_per_block_preprocessing_api = int(
+            os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
+        )
+        self._num_of_stages_dispatch_api = int(
+            os.getenv("NUM_OF_STAGES_DISPATCH_API", "10")
+        )
+        self._num_of_in_flight_s2g_dispatch_api = int(
+            os.getenv("NUM_OF_IN_FLIGHT_S2G_DISPATCH_API", "8")
+        )
+        self._num_of_tokens_per_chunk_dispatch_api = int(
+            os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")
+        )
+        if self.num_of_nodes > 1:
+            self._num_of_stages_g2s_combine_api = int(
+                os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "5")
+            )
+        else:
+            self._num_of_stages_g2s_combine_api = int(
+                os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "10")
+            )
+        self._num_of_stages_s2g_combine_api = int(
+            os.getenv("NUM_OF_STAGES_S2G_COMBINE_API", "2")
+        )
+        self._num_of_tokens_per_chunk_combine_api = int(
+            os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
+        )
+        self._num_of_tokens_per_group_combine_api = int(
+            os.getenv("NUM_OF_TOKENS_PER_GROUP_COMBINE_API", "4")
+        )
+        self._num_of_additional_in_flight_s2g_combine_api = int(
+            os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", "2")
+        )
+        self._template_config_cache = {}
         
         # Initialize the BufferConfig for the hybrid-ep buffer allocation.
         self.config = hybrid_ep_cpp.BufferConfig()
@@ -164,85 +197,87 @@ class HybridEPBuffer:
         Initialize the HybridEpConfigInstance which used to control the detailed setting of the hybrid-ep kernel.
         In common case, no need to change the default setting.
         """
-        config = hybrid_ep_cpp.HybridEpConfigInstance()
-
-        # Initialize the ConfigInstance
-        # Hybrid-ep Config
-        config.hidden_dim = (
+        resolved_hidden_dim = (
             hidden_dim if hidden_dim is not None else self.config.hidden_dim
         )
         if num_of_tokens_per_rank is None:
             num_of_tokens_per_rank = self.config.max_num_of_tokens_per_rank
         # Align num_of_tokens_per_rank up to the nearest multiple of 16.
-        num_of_tokens_per_rank = (num_of_tokens_per_rank + 15) // 16 * 16
-        config.max_num_of_tokens_per_rank = max(
-            num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
+        resolved_num_of_tokens_per_rank = (num_of_tokens_per_rank + 15) // 16 * 16
+        resolved_max_num_of_tokens_per_rank = max(
+            resolved_num_of_tokens_per_rank, self.config.max_num_of_tokens_per_rank
         )
-        self.config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
-        
-        config.num_of_experts_per_rank = (
+        resolved_num_local_experts = (
             num_local_experts
             if num_local_experts is not None
             else self.config.num_of_experts_per_rank
         )
+        resolved_use_fp8 = self.use_fp8 if use_fp8 is None else use_fp8
+        cache_key = (
+            resolved_hidden_dim,
+            resolved_max_num_of_tokens_per_rank,
+            resolved_num_local_experts,
+            resolved_use_fp8,
+        )
+        cached_config = self._template_config_cache.get(cache_key)
+        if cached_config is not None:
+            return cached_config
+
+        config = hybrid_ep_cpp.HybridEpConfigInstance()
+
+        # Initialize the ConfigInstance
+        # Hybrid-ep Config
+        config.hidden_dim = resolved_hidden_dim
+        config.max_num_of_tokens_per_rank = resolved_max_num_of_tokens_per_rank
+        self.config.max_num_of_tokens_per_rank = config.max_num_of_tokens_per_rank
+
+        config.num_of_experts_per_rank = resolved_num_local_experts
         config.num_of_ranks_per_node = self.num_of_hybrid_ep_ranks_per_nvlink_domain
         config.num_of_nodes = self.num_of_nodes
 
         # Metadata-preprocessing API Config
         config.num_of_blocks_preprocessing_api = self.num_sms_preprocessing_api
-        config.num_of_threads_per_block_preprocessing_api = int(
-            os.getenv("NUM_OF_THREADS_PER_BLOCK_PREPROCESSING_API", "512")
+        config.num_of_threads_per_block_preprocessing_api = (
+            self._num_threads_per_block_preprocessing_api
         )
         config.num_of_blocks_permute_api = self.num_blocks_permute_api
 
         # Dispatch API Config
-        if use_fp8 is None:
-            use_fp8 = self.use_fp8
         config.token_data_type = (
-            hybrid_ep_cpp.UINT8 if use_fp8 else hybrid_ep_cpp.UINT16
+            hybrid_ep_cpp.UINT8 if resolved_use_fp8 else hybrid_ep_cpp.UINT16
         )
         config.num_of_blocks_dispatch_api = self.num_sms_dispatch_api
         config.device_side_sync_dispatch_api = True
         # Dispatch stages config:
-        config.num_of_stages_dispatch_api = int(
-            os.getenv("NUM_OF_STAGES_DISPATCH_API", "10")
+        config.num_of_stages_dispatch_api = self._num_of_stages_dispatch_api
+        config.num_of_in_flight_s2g_dispatch_api = (
+            self._num_of_in_flight_s2g_dispatch_api
         )
-        config.num_of_in_flight_s2g_dispatch_api = int(
-            os.getenv("NUM_OF_IN_FLIGHT_S2G_DISPATCH_API", "8")
-        )
-        config.num_of_tokens_per_chunk_dispatch_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API", "128")
+        config.num_of_tokens_per_chunk_dispatch_api = (
+            self._num_of_tokens_per_chunk_dispatch_api
         )
 
         # Combine API Config
         config.num_of_blocks_combine_api = self.num_sms_combine_api
         config.device_side_sync_combine_api = True
         # Combine stages config:
-        if self.config.num_of_nodes > 1:
-            config.num_of_stages_g2s_combine_api = int(
-                os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "5")
-            )
-        else:
-            config.num_of_stages_g2s_combine_api = int(
-                os.getenv("NUM_OF_STAGES_G2S_COMBINE_API", "10")
-            )
-        config.num_of_stages_s2g_combine_api = int(
-            os.getenv("NUM_OF_STAGES_S2G_COMBINE_API", "2")
+        config.num_of_stages_g2s_combine_api = self._num_of_stages_g2s_combine_api
+        config.num_of_stages_s2g_combine_api = self._num_of_stages_s2g_combine_api
+        config.num_of_tokens_per_chunk_combine_api = (
+            self._num_of_tokens_per_chunk_combine_api
         )
-        config.num_of_tokens_per_chunk_combine_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_CHUNK_COMBINE_API", "128")
+        config.num_of_tokens_per_group_combine_api = (
+            self._num_of_tokens_per_group_combine_api
         )
-        config.num_of_tokens_per_group_combine_api = int(
-            os.getenv("NUM_OF_TOKENS_PER_GROUP_COMBINE_API", "4")
-        )
-        config.num_of_additional_in_flight_s2g_combine_api = int(
-            os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", "2")
+        config.num_of_additional_in_flight_s2g_combine_api = (
+            self._num_of_additional_in_flight_s2g_combine_api
         )
 
         assert config.is_valid(), "The config is not valid."
 
         # Use the runtime kernel config to update the buffer.
         self.runtime.update_buffer(config)
+        self._template_config_cache[cache_key] = config
         return config
 
     def dispatch(
@@ -533,6 +568,150 @@ class HybridEPBuffer:
             tokens_per_expert,
             handle,
         )
+
+    def get_dispatch_layout(
+        self,
+        *,
+        hidden: torch.Tensor,
+        topk_idx: torch.Tensor = None,
+        topk_weights: torch.Tensor = None,
+        num_of_experts_per_rank: int = None,
+        num_of_experts: int = None,
+        use_fp8: bool = None,
+        routing_map: torch.Tensor = None,
+        probs: torch.Tensor = None,
+        pad_multiple: int = None,
+    ):
+        """
+        Compute the exact layout required by dispatch_with_permute.
+
+        This stage synchronizes once to derive the exact num_permuted_tokens
+        while keeping tokens_per_expert on GPU, so the later dispatch stage can
+        run with non_blocking=True and exact-sized outputs.
+        """
+        with torch.cuda.nvtx.range("hybrid-ep get dispatch layout phase"):
+            num_of_tokens_per_rank, hidden_dim = hidden.shape
+            if routing_map is not None:
+                assert routing_map.dtype == torch.bool
+                num_of_experts = routing_map.size(-1)
+            else:
+                if topk_idx is not None:
+                    assert (
+                        num_of_experts is not None
+                    ), "The number of experts should be provided on index-based routing."
+                    routing_map, probs = indices_to_map(
+                        topk_idx, topk_weights, num_of_tokens_per_rank, num_of_experts
+                    )
+
+            config = self.update_template_config(
+                hidden_dim=hidden_dim,
+                num_of_tokens_per_rank=num_of_tokens_per_rank,
+                num_local_experts=num_of_experts_per_rank,
+                use_fp8=use_fp8,
+            )
+            (
+                sparse_to_dense_map,
+                rdma_to_attn_map,
+                attn_to_rdma_map,
+                num_dispatched_tokens_tensor,
+                local_expert_routing_map,
+                row_id_map,
+                tokens_per_expert,
+                overflow_flag,
+                num_permuted_tokens,
+            ) = self.runtime.get_dispatch_layout(
+                config=config,
+                routing_map=routing_map,
+                num_of_tokens_per_rank=num_of_tokens_per_rank,
+                pad_multiple=pad_multiple,
+            )
+
+            return (
+                sparse_to_dense_map,
+                rdma_to_attn_map,
+                attn_to_rdma_map,
+                num_dispatched_tokens_tensor,
+                local_expert_routing_map,
+                row_id_map,
+                num_of_tokens_per_rank,
+                config,
+                overflow_flag,
+                num_permuted_tokens,
+                tokens_per_expert,
+                pad_multiple,
+            )
+
+    def dispatch_with_permute_and_layout(
+        self,
+        *,
+        hidden: torch.Tensor,
+        layout: tuple,
+        probs: torch.Tensor = None,
+        scaling_factor: torch.Tensor = None,
+    ):
+        """
+        Dispatch with a precomputed exact permute layout.
+        """
+        with torch.cuda.nvtx.range("hybrid-ep dispatch with permute and layout phase"):
+            (
+                sparse_to_dense_map,
+                rdma_to_attn_map,
+                attn_to_rdma_map,
+                num_dispatched_tokens_tensor,
+                _local_expert_routing_map,
+                row_id_map,
+                num_of_tokens_per_rank,
+                config,
+                overflow_flag,
+                num_permuted_tokens,
+                tokens_per_expert,
+                pad_multiple,
+            ) = layout
+
+            (
+                dispatched_token,
+                dispatched_probs,
+                dispatched_scaling_factor,
+                _returned_overflow_flag,
+                _returned_row_id_map,
+                _returned_tokens_per_expert,
+            ) = self.runtime.dispatch_with_permute(
+                config=config,
+                hidden=hidden,
+                probs=probs,
+                scaling_factor=scaling_factor,
+                sparse_to_dense_map=sparse_to_dense_map,
+                rdma_to_attn_map=rdma_to_attn_map,
+                attn_to_rdma_map=attn_to_rdma_map,
+                num_dispatched_tokens_tensor=num_dispatched_tokens_tensor,
+                local_expert_routing_map=None,
+                row_id_map=row_id_map,
+                num_permuted_tokens=num_permuted_tokens,
+                num_of_tokens_per_rank=num_of_tokens_per_rank,
+                pad_multiple=pad_multiple,
+                non_blocking=True,
+                with_probs=probs is not None,
+            )
+
+            handle = (
+                sparse_to_dense_map,
+                rdma_to_attn_map,
+                attn_to_rdma_map,
+                num_dispatched_tokens_tensor,
+                None,
+                row_id_map,
+                num_of_tokens_per_rank,
+                config,
+                overflow_flag,
+            )
+
+            return (
+                dispatched_token,
+                dispatched_probs,
+                dispatched_scaling_factor,
+                tokens_per_expert,
+                handle,
+            )
 
     def combine_with_unpermute(
         self,

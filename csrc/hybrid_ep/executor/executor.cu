@@ -159,7 +159,7 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args)
             if (!args.non_blocking) {
                 cudaStreamSynchronize(args.stream);
                 if (args.num_permuted_tokens < 0) {
-                    const int64_t* tokens_per_expert_ptr = tokens_per_expert.data_ptr<int64_t>();
+                    const int* tokens_per_expert_ptr = tokens_per_expert.data_ptr<int>();
                     int64_t num_permuted_tokens = 0;
                     for (int i = 0; i < config.num_of_experts_per_rank; ++i) {
                         num_permuted_tokens += static_cast<int64_t>(tokens_per_expert_ptr[i]);

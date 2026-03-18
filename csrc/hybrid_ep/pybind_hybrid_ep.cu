@@ -134,6 +134,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("update_buffer", &HybridEPBuffer::update_buffer, py::arg("config"))
         .def("metadata_preprocessing", &HybridEPBuffer::metadata_preprocessing,
              py::kw_only(), py::arg("config"), py::arg("routing_map"), py::arg("num_of_tokens_per_rank"), py::arg("non_blocking") = false)
+        .def("get_dispatch_layout", &HybridEPBuffer::get_dispatch_layout,
+             py::kw_only(), py::arg("config"), py::arg("routing_map"),
+             py::arg("num_of_tokens_per_rank"),
+             py::arg("pad_multiple") = std::nullopt)
         .def("dispatch", &HybridEPBuffer::dispatch, py::kw_only(), 
              py::arg("config"), py::arg("hidden"),
              py::arg("probs") = c10::nullopt,

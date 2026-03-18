@@ -163,6 +163,39 @@ HybridEPBuffer::metadata_preprocessing(HybridEpConfigInstance config, torch::Ten
   return executor.metadata_preprocess_core(config, nvl_coordinator.preprocessing_tmp, global_routing_map, num_of_tokens_per_rank, non_blocking);
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           int64_t>
+HybridEPBuffer::get_dispatch_layout(HybridEpConfigInstance config,
+                                    torch::Tensor local_routing_map,
+                                    int64_t num_of_tokens_per_rank,
+                                    c10::optional<int64_t> pad_multiple) {
+  auto [sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map,
+        num_dispatched_tokens_tensor, local_expert_routing_map] =
+      metadata_preprocessing(config, local_routing_map, num_of_tokens_per_rank,
+                             true);
+
+  const int pad = pad_multiple.has_value() ? pad_multiple.value() : 0;
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  auto [row_id_map, tokens_per_expert, overflow_flag] = permute_preprocessing(
+      local_expert_routing_map.data_ptr<bool>(), num_dispatched_tokens_tensor,
+      nvl_coordinator.max_num_of_tokens, config.num_of_experts_per_rank, pad,
+      config.num_of_blocks_preprocessing_api, -1, true, stream);
+
+  auto num_permuted_tokens_tensor = tokens_per_expert.sum(torch::kInt64);
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+
+  int64_t num_permuted_tokens = 0;
+  CUDA_CHECK(cudaMemcpy(&num_permuted_tokens,
+                        num_permuted_tokens_tensor.data_ptr<int64_t>(),
+                        sizeof(int64_t), cudaMemcpyDeviceToHost));
+
+  return std::make_tuple(
+      sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map,
+      num_dispatched_tokens_tensor, local_expert_routing_map, row_id_map,
+      tokens_per_expert, overflow_flag, num_permuted_tokens);
+}
+
 std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
 HybridEPBuffer::dispatch(HybridEpConfigInstance config, 
                  torch::Tensor hidden, c10::optional<torch::Tensor> probs,

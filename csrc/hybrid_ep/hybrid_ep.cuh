@@ -28,6 +28,13 @@ public:
              torch::Tensor>
   metadata_preprocessing(HybridEpConfigInstance config, torch::Tensor global_routing_map, int64_t num_of_tokens_per_rank, bool non_blocking);
 
+  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+             torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+             int64_t>
+  get_dispatch_layout(HybridEpConfigInstance config, torch::Tensor local_routing_map,
+                      int64_t num_of_tokens_per_rank,
+                      c10::optional<int64_t> pad_multiple);
+
   std::tuple<torch::Tensor, c10::optional<torch::Tensor>, c10::optional<torch::Tensor>>
   dispatch(HybridEpConfigInstance config, 
            torch::Tensor hidden, c10::optional<torch::Tensor> probs,
