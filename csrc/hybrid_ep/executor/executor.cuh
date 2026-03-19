@@ -43,6 +43,7 @@ public:
         bool non_blocking = false;  // If enable this, the produced num_dispatched_tokens will be put
                                         // on the CPU pinned memory, and the tokens_per_expert will be put
                                         // on the CPU, which may reduce the times of the sync
+        bool return_tokens_per_expert_on_device = false;
         int64_t num_of_tokens_per_rank;  // Dynamic sequence length
         cudaStream_t stream;
     };
@@ -87,7 +88,7 @@ public:
         bool non_blocking
     );
 
-    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
+    std::tuple<torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>, torch::Tensor> 
     dispatch_preprocess(
         HybridEpConfigInstance config, DispatchArgs& args);
     template<typename DType> 

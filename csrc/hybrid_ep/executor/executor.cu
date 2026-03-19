@@ -114,7 +114,7 @@ Executor::metadata_preprocess_core(
   return std::make_tuple(sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map, num_of_tokens_for_experts, local_expert_routing_map);
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
+std::tuple<torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>, torch::Tensor> 
 Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args) {
     nvtxRangePushA("dispatch_preprocess in hybrid-ep");
     if(config.num_of_nodes > 1) {
@@ -134,6 +134,7 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args)
 
     torch::Tensor row_id_map;
     torch::Tensor tokens_per_expert;
+    c10::optional<torch::Tensor> tokens_per_expert_on_device = c10::nullopt;
     torch::Tensor overflow_flag;
 
     if(args.enable_permute) {
@@ -142,7 +143,11 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args)
             row_id_map = args.row_id_map.value();
         } else {
             assert(args.local_expert_routing_map.has_value());
-            std::tie(row_id_map, tokens_per_expert, overflow_flag) = permute_preprocessing(
+            std::tie(
+                row_id_map,
+                tokens_per_expert,
+                tokens_per_expert_on_device,
+                overflow_flag) = permute_preprocessing(
                 args.local_expert_routing_map.value().data_ptr<bool>(), 
                 args.num_dispatched_tokens_tensor.value(),
                 args.max_num_dispatched_tokens, 
@@ -151,6 +156,7 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args)
                 config.num_of_blocks_preprocessing_api,
                 args.num_permuted_tokens,
                 args.non_blocking,
+                args.return_tokens_per_expert_on_device,
                 args.stream
             );
             args.row_id_map = row_id_map;
@@ -171,7 +177,11 @@ Executor::dispatch_preprocess(HybridEpConfigInstance config, DispatchArgs& args)
     }
     nvtxRangePop();  // End of dispatch_preprocess nvtx range
 
-    return std::make_tuple(row_id_map, tokens_per_expert, overflow_flag);
+    return std::make_tuple(
+        row_id_map,
+        tokens_per_expert,
+        tokens_per_expert_on_device,
+        overflow_flag);
 }
 
 template void Executor::dispatch_core<uint8_t>(HybridEpConfigInstance config, DispatchArgs& args);

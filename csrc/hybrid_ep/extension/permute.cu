@@ -41,7 +41,8 @@
                                            int* workspace_2,
                                            int rows_workspace_2,
                                            int pad_multiple,
-                                           int* tokens_per_expert,
+                                           int* tokens_per_expert_host,
+                                           int* tokens_per_expert_device,
                                            int* row_id_map,
                                            int* overflow_flag,
                                            int num_permuted_tokens) {
@@ -53,6 +54,9 @@
    __shared__ typename BlockScan::TempStorage temp_storage;
    extern __shared__ int shmem_in_permute_preprocessing_kernel[];
    int num_dispatched_tokens = *num_dispatched_tokens_ptr;
+   int* tokens_per_expert = tokens_per_expert_device != nullptr
+                                ? tokens_per_expert_device
+                                : tokens_per_expert_host;
  
    /**
     * Pass 1: Compute the cumsum for each block, then store the result in the
@@ -236,16 +240,24 @@
      for (int i = threadIdx.x; i < num_of_local_experts; i += block_size) {
        auto tokens_for_expert_i = tokens_per_expert_shmem[i] + num_padded_tokens[i];
        auto overflow_num = tokens_for_expert_i + tokens_per_expert_prefix_sum[i] - num_permuted_tokens;
+       int final_tokens;
        if(overflow_num < 0) {
-        tokens_per_expert[i] = tokens_for_expert_i;
+        final_tokens = tokens_for_expert_i;
        }else{
-        tokens_per_expert[i] = max(0, tokens_for_expert_i - overflow_num);
+        final_tokens = max(0, tokens_for_expert_i - overflow_num);
+       }
+       tokens_per_expert[i] = final_tokens;
+       if (tokens_per_expert_host != nullptr && tokens_per_expert_host != tokens_per_expert) {
+         tokens_per_expert_host[i] = final_tokens;
+       }
+       if (tokens_per_expert_device != nullptr && tokens_per_expert_device != tokens_per_expert) {
+         tokens_per_expert_device[i] = final_tokens;
        }
      }
    }
  }
  
- std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
+ std::tuple<torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>, torch::Tensor> 
  permute_preprocessing(
      bool* routing_map,
      torch::Tensor num_dispatched_token_tensor,
@@ -256,6 +268,7 @@
      int num_of_blocks,
      int num_permuted_tokens,
      bool non_blocking,
+     bool return_tokens_per_expert_on_device,
      cudaStream_t stream) {
    constexpr int block_size = 256;
    const int warp_size = 32;
@@ -266,12 +279,17 @@
    auto row_id_map = torch::empty({max_num_dispatched_tokens + pad_multiple, num_of_local_experts},
                                   torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
    torch::Tensor tokens_per_expert;
+   c10::optional<torch::Tensor> tokens_per_expert_on_device = c10::nullopt;
    if (non_blocking) {
      tokens_per_expert =
          torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
    } else {
      tokens_per_expert =
          torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+     if (return_tokens_per_expert_on_device) {
+       tokens_per_expert_on_device =
+           torch::empty({num_of_local_experts}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+     }
    }
    torch::Tensor overflow_flag = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
  
@@ -291,14 +309,20 @@
    // Construct the parameters for the cooperative kernel
    auto workspace1_ptr = workspace1.data_ptr<int>();
    auto workspace2_ptr = workspace2.data_ptr<int>();
-   auto tokens_per_expert_ptr = tokens_per_expert.data_ptr<int>();
+   int* tokens_per_expert_host_ptr = non_blocking ? nullptr : tokens_per_expert.data_ptr<int>();
+   int* tokens_per_expert_device_ptr = non_blocking
+                                           ? tokens_per_expert.data_ptr<int>()
+                                           : (tokens_per_expert_on_device.has_value()
+                                                  ? tokens_per_expert_on_device->data_ptr<int>()
+                                                  : nullptr);
    auto row_id_map_ptr = row_id_map.data_ptr<int>();
    auto num_dispatched_token_ptr = num_dispatched_token_tensor.data_ptr<int>();
    auto overflow_flag_ptr = overflow_flag.data_ptr<int>();
    void* args[] = {
        &routing_map,           &num_dispatched_token_ptr, &num_of_local_experts, &workspace1_ptr,
        &rows_workspace_1,      &workspace2_ptr,           &rows_workspace_2,     &pad_multiple,
-       &tokens_per_expert_ptr, &row_id_map_ptr,           &overflow_flag_ptr,    &num_permuted_tokens,
+       &tokens_per_expert_host_ptr, &tokens_per_expert_device_ptr, &row_id_map_ptr,
+       &overflow_flag_ptr,    &num_permuted_tokens,
    };
  
    cudaFuncSetAttribute(permute_preprocessing_kernel<block_size, warp_size>,
@@ -306,7 +330,11 @@
    cudaLaunchCooperativeKernel(permute_preprocessing_kernel<block_size, warp_size>, num_of_blocks,
                                block_size, args, shared_mem_size, stream);
  
-   return std::make_tuple(row_id_map, tokens_per_expert, overflow_flag);
+   return std::make_tuple(
+       row_id_map,
+       tokens_per_expert,
+       tokens_per_expert_on_device,
+       overflow_flag);
  }
  
 

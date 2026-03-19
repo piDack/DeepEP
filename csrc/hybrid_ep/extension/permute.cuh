@@ -74,7 +74,7 @@ struct UnpermuteArgs {
   * @return row_id_map[out] shape: [num_dispatched_tokens, num_of_local_experts],
   * type: int
   */
- std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> 
+ std::tuple<torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>, torch::Tensor> 
  permute_preprocessing(
      bool* routing_map,
      torch::Tensor num_dispatched_token_tensor,
@@ -84,6 +84,7 @@ struct UnpermuteArgs {
      int num_of_blocks,
      int num_permuted_tokens,
      bool non_blocking,
+     bool return_tokens_per_expert_on_device,
      cudaStream_t stream);
  
  /**

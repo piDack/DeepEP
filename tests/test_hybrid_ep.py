@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved
 import argparse
+import itertools
 import time
 import torch
 import torch.distributed as dist
 import os
 import deep_ep
+from contextlib import contextmanager
 
 from utils import TorchRef, bench, bench_kineto, init_dist, count_rdma_send_from_routing_map
 
@@ -29,6 +31,17 @@ NUM_OF_RANKS_PER_NODE = None
 NUM_OF_NODES = None
 NUM_OF_EXPERTS = None
 
+SWEEP_ENV_KEYS = (
+    "NUM_OF_STAGES_DISPATCH_API",
+    "NUM_OF_IN_FLIGHT_S2G_DISPATCH_API",
+    "NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API",
+    "NUM_OF_STAGES_G2S_COMBINE_API",
+    "NUM_OF_STAGES_S2G_COMBINE_API",
+    "NUM_OF_TOKENS_PER_CHUNK_COMBINE_API",
+    "NUM_OF_TOKENS_PER_GROUP_COMBINE_API",
+    "NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API",
+)
+
 def print_in_order(msg: str):
     """Print message in order by rank to avoid interleaved output"""
     rank = dist.get_rank()
@@ -37,6 +50,82 @@ def print_in_order(msg: str):
         if i == rank:
             print(msg, flush=True)
         dist.barrier()
+
+
+def dtype_name(use_fp8: bool) -> str:
+    return "FP8" if use_fp8 else "BF16"
+
+
+def parse_csv_ints(raw: str) -> list[int]:
+    return [int(item.strip()) for item in raw.split(",") if item.strip()]
+
+
+def parse_dtype_list(raw: str) -> list[bool]:
+    values = []
+    for item in raw.split(","):
+        key = item.strip().lower()
+        if not key:
+            continue
+        if key == "bf16":
+            values.append(False)
+        elif key == "fp8":
+            values.append(True)
+        else:
+            raise ValueError(f"Unsupported dtype '{item}', expected bf16/fp8")
+    if not values:
+        raise ValueError("At least one dtype must be provided")
+    return values
+
+
+@contextmanager
+def temporary_env(overrides: dict[str, int]):
+    previous = {}
+    try:
+        for key, value in overrides.items():
+            previous[key] = os.environ.get(key)
+            os.environ[key] = str(value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def build_sweep_cases(args: argparse.Namespace) -> list[dict[str, int]]:
+    sweep_axes = {
+        "num_sms_dispatch_api": parse_csv_ints(args.sweep_sm_dispatch),
+        "num_sms_combine_api": parse_csv_ints(args.sweep_sm_combine),
+        "NUM_OF_STAGES_DISPATCH_API": parse_csv_ints(args.sweep_dispatch_stages),
+        "NUM_OF_IN_FLIGHT_S2G_DISPATCH_API": parse_csv_ints(args.sweep_dispatch_inflight),
+        "NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API": parse_csv_ints(args.sweep_dispatch_chunks),
+        "NUM_OF_STAGES_G2S_COMBINE_API": parse_csv_ints(args.sweep_combine_g2s_stages),
+        "NUM_OF_STAGES_S2G_COMBINE_API": parse_csv_ints(args.sweep_combine_s2g_stages),
+        "NUM_OF_TOKENS_PER_CHUNK_COMBINE_API": parse_csv_ints(args.sweep_combine_chunks),
+        "NUM_OF_TOKENS_PER_GROUP_COMBINE_API": parse_csv_ints(args.sweep_combine_groups),
+        "NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API": parse_csv_ints(args.sweep_combine_inflight),
+    }
+    keys = list(sweep_axes.keys())
+    values = [sweep_axes[key] for key in keys]
+    return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
+
+
+def format_sweep_case(case: dict[str, int]) -> str:
+    parts = [
+        f"sms(d={case['num_sms_dispatch_api']},c={case['num_sms_combine_api']})",
+        f"dispatch(stages={case['NUM_OF_STAGES_DISPATCH_API']},inflight={case['NUM_OF_IN_FLIGHT_S2G_DISPATCH_API']},chunk={case['NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API']})",
+        f"combine(g2s={case['NUM_OF_STAGES_G2S_COMBINE_API']},s2g={case['NUM_OF_STAGES_S2G_COMBINE_API']},chunk={case['NUM_OF_TOKENS_PER_CHUNK_COMBINE_API']},group={case['NUM_OF_TOKENS_PER_GROUP_COMBINE_API']},inflight={case['NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API']})",
+    ]
+    return " | ".join(parts)
+
+
+def summarize_score(result: dict[str, float], sort_by: str) -> float:
+    if sort_by == "dispatch":
+        return result["dispatch_torch_nvl_gbps"]
+    if sort_by == "combine":
+        return result["combine_torch_nvl_gbps"]
+    return result["dispatch_torch_nvl_gbps"] + result["combine_torch_nvl_gbps"]
 
 def bitwise_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
     if a.dtype != b.dtype or a.shape != b.shape or a.device != b.device:
@@ -384,11 +473,12 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
             print_in_order(f'[rank {rank}] HybridEP dispatch kernel(IB) ({"FP8" if hidden.dtype == torch.uint8 else "BF16"}): {rdma_send_bytes / 1e9 / dispatch_t:.2f} GB/s, avg_t={dispatch_t * 1e6:.2f} us | '
                   f'HybridEP combine kernel(IB): {combine_bf16_rdma_recv_bytes / 1e9 / combine_t:.2f} GB/s, avg_t={combine_t * 1e6:.2f} us')
     else:
+        dtype_label = dtype_name(hidden.dtype == torch.uint8)
         if torch.distributed.get_rank() == 0:
             torch.cuda.profiler.start()
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch ({dtype_label})"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
+                print(f"profile hybrid-ep dispatch ({dtype_label})", flush=True)
             dispatch_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'topk_idx': topk_idx, 'topk_weights': topk_weights, 'num_of_experts': NUM_OF_EXPERTS}
             bench(lambda: buffer.dispatch(**dispatch_args))
         with torch.cuda.nvtx.range("hybrid-ep combine"):
@@ -396,9 +486,9 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
                 print(f"profile hybrid-ep combine", flush=True)
             combine_args = {'hidden': dispatched_hidden_bf16, 'probs': dispatched_probs, 'handle': handle}
             bench(lambda: buffer.combine(**combine_args))
-        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})"):
+        with torch.cuda.nvtx.range(f"hybrid-ep dispatch+permute ({dtype_label})"):
             if rank == 0:
-                print(f"profile hybrid-ep dispatch+permute ({"FP8" if hidden.dtype == torch.uint8 else "BF16"})", flush=True)
+                print(f"profile hybrid-ep dispatch+permute ({dtype_label})", flush=True)
             dispatch_with_permute_args = {'hidden': hidden, 'scaling_factor': scaling_factor, 'routing_map': routing_map, 'probs': probs, 'pad_multiple': PAD_MULTIPLE}
             bench(lambda: buffer.dispatch_with_permute(**dispatch_with_permute_args))
         with torch.cuda.nvtx.range("hybrid-ep combine+unpermute"):
@@ -409,6 +499,164 @@ def test_hybrid_ep_benchmark(buffer: deep_ep.HybridEPBuffer, group: dist.Process
         time.sleep(1)
         if torch.distributed.get_rank() == 0:
             torch.cuda.profiler.stop()
+
+
+def benchmark_plain_torch_api(
+    buffer: deep_ep.HybridEPBuffer,
+    use_fp8: bool,
+    num_warmups: int,
+    num_tests: int,
+) -> dict[str, float]:
+    hidden, _, scaling_factor, _, topk_idx, topk_weights = init_tensor(
+        hidden_dim=HIDDEN_DIM,
+        seq_len=NUM_TOKENS_PER_RANK,
+        topk=TOPK,
+        num_of_experts=NUM_OF_EXPERTS,
+        use_fp8=use_fp8,
+    )
+
+    for _ in range(10):
+        dispatched_hidden, dispatched_probs, _, handle = buffer.dispatch(
+            hidden=hidden,
+            scaling_factor=scaling_factor,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            num_of_experts=NUM_OF_EXPERTS,
+        )
+        dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
+        buffer.combine(dispatched_hidden_bf16, None, handle)
+
+    dispatched_hidden, dispatched_probs, _, handle = buffer.dispatch(
+        hidden=hidden,
+        scaling_factor=scaling_factor,
+        topk_idx=topk_idx,
+        topk_weights=topk_weights,
+        num_of_experts=NUM_OF_EXPERTS,
+    )
+    dispatched_hidden_bf16 = dispatched_hidden.to(torch.bfloat16)
+
+    fp8_factor = (1 + 4 / 128) / 2
+    dispatch_bf16_nvl_recv_bytes = dispatched_hidden.numel() * 2
+    combine_bf16_nvl_send_bytes = dispatch_bf16_nvl_recv_bytes
+    nvl_recv_bytes = (
+        dispatch_bf16_nvl_recv_bytes * fp8_factor
+        if use_fp8
+        else dispatch_bf16_nvl_recv_bytes
+    )
+
+    dispatch_args = {
+        "hidden": hidden,
+        "scaling_factor": scaling_factor,
+        "topk_idx": topk_idx,
+        "topk_weights": topk_weights,
+        "num_of_experts": NUM_OF_EXPERTS,
+        "handle": handle,
+    }
+    combine_args = {
+        "hidden": dispatched_hidden_bf16,
+        "probs": dispatched_probs,
+        "handle": handle,
+    }
+    dispatch_t = bench(
+        lambda: buffer.dispatch(**dispatch_args),
+        num_warmups=num_warmups,
+        num_tests=num_tests,
+    )[0]
+    combine_t = bench(
+        lambda: buffer.combine(**combine_args),
+        num_warmups=num_warmups,
+        num_tests=num_tests,
+    )[0]
+    return {
+        "dispatch_torch_nvl_gbps": nvl_recv_bytes / 1e9 / dispatch_t,
+        "combine_torch_nvl_gbps": combine_bf16_nvl_send_bytes / 1e9 / combine_t,
+        "dispatch_t_us": dispatch_t * 1e6,
+        "combine_t_us": combine_t * 1e6,
+    }
+
+
+def run_hybrid_ep_sweep(group: dist.ProcessGroup, args: argparse.Namespace, use_fp8: bool):
+    rank = dist.get_rank()
+    cases = build_sweep_cases(args)
+    if rank == 0:
+        print(
+            f"[sweep] dtype={dtype_name(use_fp8)} cases={len(cases)} "
+            f"warmups={args.sweep_warmups} tests={args.sweep_tests}",
+            flush=True,
+        )
+
+    results = []
+    for idx, case in enumerate(cases, start=1):
+        env_overrides = {key: case[key] for key in SWEEP_ENV_KEYS}
+        if rank == 0:
+            print(
+                f"[sweep] case {idx}/{len(cases)} dtype={dtype_name(use_fp8)} "
+                f"{format_sweep_case(case)}",
+                flush=True,
+            )
+        dist.barrier()
+        with temporary_env(env_overrides):
+            try:
+                buffer = deep_ep.HybridEPBuffer(
+                    group=group,
+                    hidden_dim=HIDDEN_DIM,
+                    max_num_of_tokens_per_rank=MAX_NUM_OF_TOKENS_PER_RANK,
+                    num_local_experts=NUM_LOCAL_EXPERTS,
+                    use_fp8=use_fp8,
+                    num_sms_dispatch_api=case["num_sms_dispatch_api"],
+                    num_sms_combine_api=case["num_sms_combine_api"],
+                    load_cached_kernels=True,
+                )
+                metrics = benchmark_plain_torch_api(
+                    buffer,
+                    use_fp8=use_fp8,
+                    num_warmups=args.sweep_warmups,
+                    num_tests=args.sweep_tests,
+                )
+                result = {**case, **metrics}
+                results.append(result)
+                if rank == 0:
+                    print(
+                        f"[sweep-result] dtype={dtype_name(use_fp8)} "
+                        f"dispatch={result['dispatch_torch_nvl_gbps']:.2f} GB/s "
+                        f"({result['dispatch_t_us']:.2f} us), "
+                        f"combine={result['combine_torch_nvl_gbps']:.2f} GB/s "
+                        f"({result['combine_t_us']:.2f} us)",
+                        flush=True,
+                    )
+            except Exception as exc:
+                if rank == 0:
+                    print(
+                        f"[sweep-error] dtype={dtype_name(use_fp8)} "
+                        f"{format_sweep_case(case)} -> {exc}",
+                        flush=True,
+                    )
+            finally:
+                if "buffer" in locals():
+                    del buffer
+                torch.cuda.empty_cache()
+        dist.barrier()
+
+    if rank == 0 and results:
+        ranked = sorted(
+            results,
+            key=lambda item: summarize_score(item, args.sweep_sort_by),
+            reverse=True,
+        )
+        topk = min(args.sweep_topk, len(ranked))
+        print(
+            f"[sweep-summary] dtype={dtype_name(use_fp8)} sort_by={args.sweep_sort_by} topk={topk}",
+            flush=True,
+        )
+        for i, result in enumerate(ranked[:topk], start=1):
+            print(
+                f"[sweep-top{i}] dispatch={result['dispatch_torch_nvl_gbps']:.2f} GB/s "
+                f"({result['dispatch_t_us']:.2f} us), "
+                f"combine={result['combine_torch_nvl_gbps']:.2f} GB/s "
+                f"({result['combine_t_us']:.2f} us), "
+                f"{format_sweep_case(result)}",
+                flush=True,
+            )
 
 
 def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
@@ -427,7 +675,11 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        for use_fp8 in [False, True]:
+        for use_fp8 in args.dtypes:
+            if args.sweep:
+                run_hybrid_ep_sweep(group, args, use_fp8)
+                continue
+
             buffer = deep_ep.HybridEPBuffer(
                 group=group,
                 hidden_dim=HIDDEN_DIM,
@@ -442,7 +694,8 @@ def test_main(local_rank: int, num_local_ranks: int, args: argparse.Namespace):
                 num_of_ranks_per_node=NUM_OF_RANKS_PER_NODE,
             )
 
-            test_hybrid_ep_correctness(buffer, ref, use_fp8)
+            if not args.skip_correctness:
+                test_hybrid_ep_correctness(buffer, ref, use_fp8)
             test_hybrid_ep_benchmark(buffer, group, use_fp8, args.nsys_profile)
     dist.barrier()
     dist.destroy_process_group()
@@ -453,5 +706,39 @@ if __name__ == "__main__":
                        help='Number of processes to spawn (default: 4)')
     parser.add_argument('--nsys-profile', action='store_true', default=False,
                        help='benchmark with nsys profile or not (default: False)')
+    parser.add_argument('--skip-correctness', action='store_true', default=False,
+                       help='skip correctness checks before benchmarking')
+    parser.add_argument('--dtypes', type=parse_dtype_list, default=parse_dtype_list('bf16,fp8'),
+                       help='comma-separated dtypes to run: bf16,fp8')
+    parser.add_argument('--sweep', action='store_true', default=False,
+                       help='run parameter sweep for HybridEP torch API benchmarks')
+    parser.add_argument('--sweep-warmups', type=int, default=10,
+                       help='warmup iterations per sweep case')
+    parser.add_argument('--sweep-tests', type=int, default=20,
+                       help='timed iterations per sweep case')
+    parser.add_argument('--sweep-topk', type=int, default=5,
+                       help='number of best sweep cases to summarize')
+    parser.add_argument('--sweep-sort-by', choices=('score', 'dispatch', 'combine'), default='score',
+                       help='summary ranking metric')
+    parser.add_argument('--sweep-sm-dispatch', type=str, default='32',
+                       help='comma-separated dispatch SM counts')
+    parser.add_argument('--sweep-sm-combine', type=str, default='32',
+                       help='comma-separated combine SM counts')
+    parser.add_argument('--sweep-dispatch-stages', type=str, default='10',
+                       help='comma-separated NUM_OF_STAGES_DISPATCH_API values')
+    parser.add_argument('--sweep-dispatch-inflight', type=str, default='8',
+                       help='comma-separated NUM_OF_IN_FLIGHT_S2G_DISPATCH_API values')
+    parser.add_argument('--sweep-dispatch-chunks', type=str, default='128',
+                       help='comma-separated NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API values')
+    parser.add_argument('--sweep-combine-g2s-stages', type=str, default='10',
+                       help='comma-separated NUM_OF_STAGES_G2S_COMBINE_API values')
+    parser.add_argument('--sweep-combine-s2g-stages', type=str, default='2',
+                       help='comma-separated NUM_OF_STAGES_S2G_COMBINE_API values')
+    parser.add_argument('--sweep-combine-chunks', type=str, default='128',
+                       help='comma-separated NUM_OF_TOKENS_PER_CHUNK_COMBINE_API values')
+    parser.add_argument('--sweep-combine-groups', type=str, default='4',
+                       help='comma-separated NUM_OF_TOKENS_PER_GROUP_COMBINE_API values')
+    parser.add_argument('--sweep-combine-inflight', type=str, default='2',
+                       help='comma-separated NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API values')
     args = parser.parse_args()
     torch.multiprocessing.spawn(test_main, args=(args.num_processes, args), nprocs=args.num_processes)

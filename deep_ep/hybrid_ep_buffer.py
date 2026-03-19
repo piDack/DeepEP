@@ -45,7 +45,7 @@ class HybridEPBuffer:
         num_sms_combine_api: int = None,
         num_sms_preprocessing_api: int = None,
         # Experimental features
-        load_cached_kernels: bool = False,  
+        load_cached_kernels: bool = False,
         use_shared_buffer: bool = True,
         enable_custom_allgather: bool = False,
         # Deprecated parameters
@@ -71,7 +71,7 @@ class HybridEPBuffer:
                 )
         else:
             self.num_of_hybrid_ep_ranks_per_nvlink_domain = detected_ranks
-        
+
         assert (
             self.group_size % self.num_of_hybrid_ep_ranks_per_nvlink_domain == 0
         ), f"The number of ranks {self.group_size} should be divisible by the number of ranks per node {self.num_of_hybrid_ep_ranks_per_nvlink_domain} at rank={self.rank}."
@@ -137,7 +137,7 @@ class HybridEPBuffer:
             os.getenv("NUM_OF_ADDITIONAL_IN_FLIGHT_S2G_COMBINE_API", "2")
         )
         self._template_config_cache = {}
-        
+
         # Initialize the BufferConfig for the hybrid-ep buffer allocation.
         self.config = hybrid_ep_cpp.BufferConfig()
         self.config.hidden_dim = hidden_dim
@@ -164,15 +164,15 @@ class HybridEPBuffer:
         if not self.config.is_valid():
             print(f"The buffer config is not valid. hidden_dim={hidden_dim}, max_num_of_tokens_per_rank={max_num_of_tokens_per_rank}, num_local_experts={num_local_experts}, self.config.num_of_ranks_per_node={self.config.num_of_ranks_per_node}, self.config.num_of_nodes={self.config.num_of_nodes}, use_fp8={use_fp8}")
             raise ValueError("The buffer config is not valid.")
-      
+
         # Create C++ buffer - this will allocate all buffers during construction
         self.runtime = hybrid_ep_cpp.HybridEPBuffer(
-            self.group, 
-            self.config, 
-            self.local_rank, 
-            self.node_rank, 
-            self.group_size, 
-            os.path.dirname(os.path.abspath(__file__)), 
+            self.group,
+            self.config,
+            self.local_rank,
+            self.node_rank,
+            self.group_size,
+            os.path.dirname(os.path.abspath(__file__)),
             load_cached_kernels = load_cached_kernels,   # whether to load the cached kernels in disk
             use_shared_buffer = use_shared_buffer,      # whether to use the shared buffer for dispatch and combine
             enable_custom_allgather = enable_custom_allgather  # whether to use the custom allgather for intra-node communication
@@ -452,6 +452,9 @@ class HybridEPBuffer:
         # If non_blocking is True, no stream synchronization will be used, the all output are on the GPU.
         # Otherwise, num_dispatched_tokens_tensor and tokens_per_expert are on the CPU pinned memory, the stream synchronization will be used to wait for the data in pinned memory.
         non_blocking: bool = False,
+        # Keep the existing host-side tokens_per_expert path, but also materialize
+        # a CUDA mirror and return that tensor instead of the host copy.
+        return_tokens_per_expert_on_device: bool = False,
         # Deprecated parameters
         num_dispatched_tokens: int = None,
         use_host_meta: bool = None,
@@ -546,6 +549,7 @@ class HybridEPBuffer:
                 num_of_tokens_per_rank=num_of_tokens_per_rank,
                 pad_multiple=pad_multiple,
                 non_blocking=non_blocking,
+                return_tokens_per_expert_on_device=return_tokens_per_expert_on_device,
                 with_probs=probs is not None,
             )
 
@@ -560,7 +564,7 @@ class HybridEPBuffer:
                 config,
                 overflow_flag,
             )
-        
+
         return (
             dispatched_token,
             dispatched_probs,

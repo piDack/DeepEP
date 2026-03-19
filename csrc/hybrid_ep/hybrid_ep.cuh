@@ -65,6 +65,7 @@ public:
             int64_t num_of_tokens_per_rank,
             c10::optional<int64_t> pad_multiple,
             bool non_blocking,
+            bool return_tokens_per_expert_on_device,
             bool with_probs);
 
   std::tuple<torch::Tensor, torch::Tensor>

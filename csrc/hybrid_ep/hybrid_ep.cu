@@ -177,10 +177,10 @@ HybridEPBuffer::get_dispatch_layout(HybridEpConfigInstance config,
 
   const int pad = pad_multiple.has_value() ? pad_multiple.value() : 0;
   const auto stream = at::cuda::getCurrentCUDAStream();
-  auto [row_id_map, tokens_per_expert, overflow_flag] = permute_preprocessing(
+  auto [row_id_map, tokens_per_expert, _, overflow_flag] = permute_preprocessing(
       local_expert_routing_map.data_ptr<bool>(), num_dispatched_tokens_tensor,
       nvl_coordinator.max_num_of_tokens, config.num_of_experts_per_rank, pad,
-      config.num_of_blocks_preprocessing_api, -1, true, stream);
+      config.num_of_blocks_preprocessing_api, -1, true, false, stream);
 
   auto num_permuted_tokens_tensor = tokens_per_expert.sum(torch::kInt64);
   CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -316,6 +316,7 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
           int64_t num_of_tokens_per_rank,
           c10::optional<int64_t> pad_multiple,
           bool non_blocking,
+          bool return_tokens_per_expert_on_device,
           bool with_probs)
 {
  // Check the input tensors
@@ -348,13 +349,15 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
  args.num_permuted_tokens = (num_permuted_tokens.has_value()) ? num_permuted_tokens.value() : -1;
  args.pad_multiple = (pad_multiple.has_value()) ? pad_multiple.value() : 0;
  args.non_blocking = non_blocking;
+ args.return_tokens_per_expert_on_device = return_tokens_per_expert_on_device;
  args.num_of_tokens_per_rank = num_of_tokens_per_rank;
  args.enable_permute = true;
  args.stream = at::cuda::getCurrentCUDAStream();
  
  // Run the full dispatch operation
  config.forward_dispatch_api = with_probs;
- auto [result_row_id_map, result_tokens_per_expert, overflow_flag] = executor.dispatch_preprocess(config, args);
+ auto [result_row_id_map, result_tokens_per_expert, result_tokens_per_expert_on_device, overflow_flag] =
+     executor.dispatch_preprocess(config, args);
  if(config.token_data_type == APP_TOKEN_DATA_TYPE::UINT8) {
    executor.dispatch_core<uint8_t>(config, args);
  } else if (config.token_data_type == APP_TOKEN_DATA_TYPE::UINT16) {
@@ -365,7 +368,12 @@ HybridEPBuffer::dispatch_with_permute(HybridEpConfigInstance config,
 
  auto [dispatched_tokens, dispatched_probs, dispatched_scaling_factor] = executor.dispatch_postprocess(config, args);
 
- return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, overflow_flag, result_row_id_map, result_tokens_per_expert);
+ auto returned_tokens_per_expert =
+     (return_tokens_per_expert_on_device && result_tokens_per_expert_on_device.has_value())
+         ? result_tokens_per_expert_on_device.value()
+         : result_tokens_per_expert;
+
+ return std::make_tuple(dispatched_tokens, dispatched_probs, dispatched_scaling_factor, overflow_flag, result_row_id_map, returned_tokens_per_expert);
 }
 
 std::tuple<torch::Tensor, torch::Tensor>
